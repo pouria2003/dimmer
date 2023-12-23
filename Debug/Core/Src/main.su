@@ -1,0 +1,17 @@
+../Core/Src/main.c:82:6:warn	8	static
+../Core/Src/main.c:91:6:warnOff	8	static
+../Core/Src/main.c:100:6:HAL_ADC_ConvCpltCallback	24	static
+../Core/Src/main.c:126:6:setDimstep	16	static
+../Core/Src/main.c:138:6:setLights	16	static
+../Core/Src/main.c:148:6:commandExtract	32	static
+../Core/Src/main.c:157:6:HAL_UART_RxCpltCallback	16	static
+../Core/Src/main.c:195:5:main	8	static
+../Core/Src/main.c:257:6:SystemClock_Config	128	static
+../Core/Src/main.c:311:13:MX_ADC1_Init	48	static
+../Core/Src/main.c:377:13:MX_I2C1_Init	8	static
+../Core/Src/main.c:425:13:MX_SPI1_Init	8	static
+../Core/Src/main.c:465:13:MX_TIM1_Init	112	static
+../Core/Src/main.c:557:13:MX_USART2_UART_Init	8	static
+../Core/Src/main.c:592:13:MX_USB_PCD_Init	8	static
+../Core/Src/main.c:623:13:MX_GPIO_Init	48	static
+../Core/Src/main.c:671:6:Error_Handler	4	static,ignoring_inline_asm
