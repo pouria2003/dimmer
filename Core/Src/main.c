@@ -86,6 +86,14 @@ TIM_HandleTypeDef *pwm_timer = &htim2;	// Point to PWM Timer configured in CubeM
 uint32_t pwm_channel = TIM_CHANNEL_4;   // Select configured PWM channel number
 uint32_t volume = 50;
 
+int dimstep = 9;
+int lights = 4;
+int warnnum = 1;
+int warncount = 0;
+unsigned char in_data[100];
+unsigned char message[50];
+int treshhold = 1000;
+int warnsit = 0;
 
 Tone sinusoid[200];
 Tone ramp[200];
@@ -99,9 +107,15 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	static uint32_t current_time = 0;
 	static uint32_t current_tone_index = 0;
     if (htim->Instance == TIM3) {
-    	if(HAL_GetTick() - current_time > ramp[current_tone_index].duration) {
+
+    	if(warnsit && HAL_GetTick() - current_time > 5) {
     		current_tone_index = (current_tone_index + 1) % 200;
-    		PWM_Change_Tone(ramp[current_tone_index].frequency, volume);
+    		if (warnnum == 1)
+    			PWM_Change_Tone(sinusoid[current_tone_index].frequency, volume);
+    		else if (warnnum == 2)
+    			PWM_Change_Tone(ustep[current_tone_index].frequency, volume);
+    		else if (warnnum == 3)
+    			PWM_Change_Tone(ramp[current_tone_index].frequency, volume);
     		current_time = HAL_GetTick();
     	}
     }
@@ -136,57 +150,58 @@ void PWM_Change_Tone(uint16_t pwm_freq, uint16_t volume) // pwm_freq (1 - 20000)
 
 
 
-	int dimstep = 9;
-	int lights = 4;
-	int warnnum;
-	int warncount;
-	unsigned char in_data[100];
-	unsigned char message[50];
-	int treshhold = 1000;
-	int warnsit = 0;
-
 void warn() {
-	strcpy(message, "wanr on\n");
-	HAL_UART_Transmit(&huart2, message, 10, 1000);
+	sprintf(message, "warn on:%03d\n", warncount);
+	HAL_UART_Transmit(&huart2, message, 12, 1000);
 	HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
 	HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_2);
 	HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_3);
 	HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_4);
+	warncount++;
+	volume = 50;
 }
 
 void warnOff() {
-	strcpy(message, "wanr off\n");
-	HAL_UART_Transmit(&huart2, message, 10, 1000);
+	strcpy(message, "warn off\n");
+	HAL_UART_Transmit(&huart2, message, 9, 1000);
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
+	volume = 0;
+	PWM_Change_Tone(0, 0);
 }
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
-	static int sample = 0;
-	static int buff[10];
-	int x;
-	buff[sample] = HAL_ADC_GetValue(&hadc1);
-    sample += 1;
-    if(sample == 10) {
-    	sample = 0;
-    	x = 0;
-    	for(int i = 0; i < 10; ++i) {
-    		x = (x > buff[i]) ? x : buff[i];
-    	}
-    	if(x > treshhold) {
-    			warnsit = 1;
-    	    	warn();
-    	} else if(warnsit == 1) {
-    	    	warnOff();
-    	    	warnsit = 0;
-    	    }
-    }
-    HAL_Delay(20);
-
-    HAL_ADC_Start_IT(&hadc1);
+	if(hadc->Instance == ADC1) {
+		static int sample = 0;
+		static int buff[10];
+		int x;
+		buff[sample] = HAL_ADC_GetValue(&hadc1);
+		sample += 1;
+		if(sample == 10) {
+			sample = 0;
+			x = 0;
+			for(int i = 0; i < 10; ++i) {
+				x = (x > buff[i]) ? x : buff[i];
+			}
+			if(x > treshhold && warnsit == 0) {
+					warnsit = 1;
+					warn();
+			} else if(x <= treshhold && warnsit == 1) {
+					warnOff();
+					warnsit = 0;
+			}
+		}
+		HAL_ADC_Start_IT(&hadc1);
+	}
+	else if(hadc->Instance == ADC2) {
+//		int temp = HAL_ADC_GetValue(&hadc2);
+//		sprintf(message, "vol : %d\n", temp);
+//		HAL_UART_Transmit(&huart2, message, 9, 1000);
+//		HAL_ADC_Start_IT(&hadc2);
+	}
 }
 
 void setDimstep(int val) {
@@ -208,6 +223,16 @@ void setLights(int val) {
 	}
 	else {
 //		printError();
+	}
+}
+
+void setWarnnum(int val) {
+	if(val >= 1 && val <= 3) {
+		warnnum = val;
+	}
+	else {
+
+
 	}
 }
 
@@ -241,17 +266,75 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     		in_val = in_data[7] - '0';
     		setLights(in_val);
     	}
-//    	else if(strcpy(command, "WARNNUM")) {
-//    		HAL_UART_Receive(&huart2, in_data, 1, 100);
-//    		in_val = in_data[0] - '0';
-//    		setWarnnum(in_val);
-//    	}
+    	else if(in_data[0] == 'W') {
+    		HAL_UART_Receive(&huart2, in_data, 1, 100);
+    		in_val = in_data[0] - '0';
+    		setWarnnum(in_val);
+    	}
 
     	HAL_UART_Receive_IT(&huart2, in_data, 8);
 
     }
 }
+void display_digit(int n, int d, int delay, int dp){
+	// Which of the four digits is this
+	// Active high 7-segment, low pin -> digit on
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, d == 0 ? 0 : 1);
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, d == 1 ? 0 : 1);
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, d == 2 ? 0 : 1);
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, d == 3 ? 0 : 1);
 
+    // ABCD BCD Output
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_8, (n == 1 || n == 3 || n == 5 || n == 7 || n == 9));
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_9, (n == 2 || n == 3 || n == 6 || n == 7));
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, (n == 4 || n == 5 || n == 6 || n == 7));
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_11, (n == 8 || n == 9));
+
+    // Is decimal point on or off for digit?
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_6, dp == 1 ? 1 : 0);
+    HAL_Delay(delay);
+  }
+int selected = 1;
+uint32_t last_interrupt = 0;
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
+	if (last_interrupt == 0)
+		last_interrupt = HAL_GetTick();
+	else if (HAL_GetTick()-last_interrupt < 200){
+		return;
+	}
+	else
+		last_interrupt = HAL_GetTick();
+	sprintf(message, "EXTI : %d\n", GPIO_Pin);
+	HAL_UART_Transmit(&huart2, message, 9, 1000);
+	if (GPIO_Pin == GPIO_PIN_7){
+		if (selected == 1)
+		  selected = 3;
+		else
+		  selected -= 1;
+	}
+	if (GPIO_Pin == GPIO_PIN_8){
+		if (selected == 1){
+			warnnum = warnnum < 3 ? warnnum + 1 : 1;
+		}
+		else if (selected == 2){
+			setLights((lights + 1) % 5);
+		}
+		else if (selected == 3){
+			setDimstep((dimstep + 1) % 10);
+		}
+	}
+	if (GPIO_Pin == GPIO_PIN_9){
+		if (selected == 1){
+			warnnum = warnnum >  1 ? warnnum - 1 : 3;
+		}
+		else if (selected == 2){
+			setLights(lights > 0 ? lights - 1 : 4);
+		}
+		else if (selected == 3){
+			setDimstep(dimstep > 0 ? dimstep - 1 : 9);
+		}
+	}
+}
 /* USER CODE END 0 */
 
 /**
@@ -321,8 +404,11 @@ int main(void)
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
 
   HAL_ADC_Start_IT(&hadc1);
+//  HAL_ADC_Start_IT(&hadc2);
   HAL_UART_Receive_IT(&huart2, in_data, 8);
   setDimstep(dimstep);
+  HAL_TIM_Base_Start_IT(&htim3);
+  PWM_Start();
 
   while (1)
   {
@@ -330,6 +416,10 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+	  display_digit(warncount, 0, 2, selected == 0);
+	  display_digit(warnnum, 1, 2, selected == 1);
+	  display_digit(lights, 2, 2, selected == 2);
+	  display_digit(dimstep, 3, 2, selected == 3);
   }
   /* USER CODE END 3 */
 }
@@ -808,10 +898,18 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOF_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOE, CS_I2C_SPI_Pin|LD4_Pin|LD5_Pin|LD9_Pin
+  HAL_GPIO_WritePin(GPIOE, CS_I2C_SPI_Pin|LD4_Pin|GPIO_PIN_10|LD9_Pin
                           |LD6_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_11
+                          |GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_6, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : DRDY_Pin MEMS_INT3_Pin MEMS_INT4_Pin MEMS_INT1_Pin
                            MEMS_INT2_Pin */
@@ -821,9 +919,9 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : CS_I2C_SPI_Pin LD4_Pin LD5_Pin LD9_Pin
+  /*Configure GPIO pins : CS_I2C_SPI_Pin LD4_Pin PE10 LD9_Pin
                            LD6_Pin */
-  GPIO_InitStruct.Pin = CS_I2C_SPI_Pin|LD4_Pin|LD5_Pin|LD9_Pin
+  GPIO_InitStruct.Pin = CS_I2C_SPI_Pin|LD4_Pin|GPIO_PIN_10|LD9_Pin
                           |LD6_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
@@ -835,6 +933,32 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PD8 PD9 PD10 PD11
+                           PD12 PD13 PD14 PD15 */
+  GPIO_InitStruct.Pin = GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_11
+                          |GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PC6 */
+  GPIO_InitStruct.Pin = GPIO_PIN_6;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PC7 PC8 PC9 */
+  GPIO_InitStruct.Pin = GPIO_PIN_7|GPIO_PIN_8|GPIO_PIN_9;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
 }
 
