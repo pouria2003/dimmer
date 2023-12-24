@@ -40,7 +40,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
-ADC_HandleTypeDef hadc2;
+ADC_HandleTypeDef hadc4;
 
 I2C_HandleTypeDef hi2c1;
 
@@ -69,7 +69,7 @@ static void MX_USART2_UART_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
-static void MX_ADC2_Init(void);
+static void MX_ADC4_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -99,13 +99,17 @@ uint32_t pwm_channel = TIM_CHANNEL_4;   // Select configured PWM channel number
 uint32_t volume = 50;
 
 int dimstep = 9;
+int dim_v = 0;
 int lights = 4;
 int warnnum = 1;
 int warncount = 0;
 unsigned char in_data[100];
 unsigned char message[50];
-int treshhold = 700;
+int treshhold = 0;
+int env_light = -1;
 int warnsit = 0;
+int calib_input = 0;
+int calibrating = 1;
 
 Tone sinusoid[200];
 Tone ramp[200];
@@ -146,7 +150,6 @@ void writeLog(int log_info, int info) {
 			break;
 	}
 	HAL_UART_Transmit(&huart2, message, strlen(message), 1000);
-
 }
 
 
@@ -170,9 +173,14 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     }
 }
 
-void PWM_Start()
+void Buzzer_PWM_Start()
 {
     HAL_TIM_PWM_Start(pwm_timer, pwm_channel);
+}
+
+void Buzzer_PWM_Stop()
+{
+    HAL_TIM_PWM_Stop(pwm_timer, pwm_channel);
 }
 
 void PWM_Change_Tone(uint16_t pwm_freq, uint16_t volume) // pwm_freq (1 - 20000), volume (0 - 1000)
@@ -203,10 +211,8 @@ void warn(int light) {
 
 	if(HAL_GetTick() - last_warn_change < 300)
 		return;
-//	sprintf(message, "warn on %d - %d\n", HAL_GetTick(), last_warn_change);
-//	HAL_UART_Transmit(&huart2, message, strlen(message), 100);
+	Buzzer_PWM_Start();
 	writeLog(CRITICAL_SITUATION, light);
-//	HAL_UART_Transmit(&huart2, message, 12, 1000);
 	HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
 	HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_2);
 	HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_3);
@@ -219,7 +225,7 @@ void warnOff() {
 
 	if(HAL_GetTick() - last_warn_change < 300)
 		return;
-//	sprintf(message, "warn off %d - %d\n", HAL_GetTick(), last_warn_change);
+	Buzzer_PWM_Stop();
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
@@ -229,14 +235,28 @@ void warnOff() {
 
 }
 
+void Update_LEDs(){
+	int ccr = dimstep * 10 + (dim_v - 9);
+	ccr = ccr < 0 ? 0 : ccr;
+	TIM1->CCR1 = (lights >= 1) ? ccr : 0;
+	TIM1->CCR2 = (lights >= 2) ? ccr : 0;
+	TIM1->CCR3 = (lights >= 3) ? ccr : 0;
+	TIM1->CCR4 = (lights >= 4) ? ccr : 0;
+}
+
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
-
-
-		static int current_time = 0;
+	if (hadc->Instance == ADC1){
+		static int adc1_call_counter = 0;
 		static int sample = 0;
 		static int buff[10];
 		int x;
+		if (adc1_call_counter < 1000){
+			adc1_call_counter++;
+			HAL_ADC_Start_IT(&hadc1);
+			return;
+		}
+		adc1_call_counter = 0;
 		buff[sample] = HAL_ADC_GetValue(&hadc1);
 		sample += 1;
 		if(sample == 10) {
@@ -246,17 +266,49 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 				x = (x > buff[i]) ? x : buff[i];
 			}
 
+			// Save env_light once if calibrating
+			if (calibrating == 1){
+				if (env_light == -1){
+					env_light = HAL_ADC_GetValue(&hadc1);
+					sprintf(message, "env_light=%d\n", env_light);
+					HAL_UART_Transmit(&huart2, message, strlen(message), 1000);
+				}
+				// Stop ADC IT execution, until restarted in external interrupt handler (any key press)
+				return;
+			}
+
 			if(x > treshhold && warnsit == 0) {
 					warnsit = 1;
 					warn(x);
 			} else if(x <= treshhold && warnsit == 1) {
 				warnOff();
 				warnsit = 0;
-
 			}
 		}
 		HAL_ADC_Start_IT(&hadc1);
-
+	}
+	else if (hadc->Instance == ADC4){
+		static int adc4_call_counter = 0;
+		if (adc4_call_counter < 10000){
+			adc4_call_counter++;
+			HAL_ADC_Start_IT(&hadc4);
+			return;
+		}
+		adc4_call_counter = 0;
+		int adc4_value = HAL_ADC_GetValue(&hadc4);
+		if (calibrating == 1){
+			// Remove mod 20
+			calib_input = adc4_value - (adc4_value % 20);
+		}
+		else{
+			adc4_value = adc4_value / 1024.0 * 18; // [0-18] range
+			if (dim_v != adc4_value){
+				dim_v = adc4_value;
+				Update_LEDs();
+			}
+		}
+		HAL_ADC_Start_IT(&hadc4);
+	}
 }
 
 void setDimstep(int val) {
@@ -266,10 +318,7 @@ void setDimstep(int val) {
 		else
 			writeLog(DIMSTEP_DECREASED, 0);
 		dimstep = val;
-		TIM1->CCR1 = (lights >= 1) ? dimstep : 0;
-		TIM1->CCR2 = (lights >= 2) ? dimstep : 0;
-		TIM1->CCR3 = (lights >= 3) ? dimstep : 0;
-		TIM1->CCR4 = (lights >= 4) ? dimstep : 0;
+		Update_LEDs();
 	} else {
 		writeLog(NOT_VALID_VALUE, 0);
 	}
@@ -278,7 +327,7 @@ void setDimstep(int val) {
 void setLights(int val) {
 	if(val >= 0 && val <= 4) {
 		lights = val;
-		setDimstep(dimstep);
+		Update_LEDs();
 	}
 	else {
 		writeLog(NOT_VALID_VALUE, 0);
@@ -355,6 +404,14 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
 	else
 		last_interrupt = HAL_GetTick();
 
+	// Press any key to finish calibrating
+	if (calibrating == 1){
+		treshhold = env_light+calib_input;
+		sprintf(message, "threshold=%d\n", treshhold);
+		HAL_UART_Transmit(&huart2, message, strlen(message), 1000);
+		End_Calibrate();
+		return;
+	}
 	if (GPIO_Pin == GPIO_PIN_7){
 		if (selected == 1)
 		  selected = 3;
@@ -387,6 +444,20 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
 			setDimstep(dimstep > 0 ? dimstep - 1 : 9);
 		}
 	}
+}
+void End_Calibrate(){
+	// Turn on lights
+	setDimstep(dimstep);
+	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
+	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
+	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
+	// Turn on UART Receive
+	HAL_UART_Receive_IT(&huart2, in_data, 8);
+	// Restart ADC1 (LDR)
+	HAL_ADC_Start_IT(&hadc1);
+
+	calibrating = 0;
 }
 /* USER CODE END 0 */
 
@@ -442,7 +513,7 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
-  MX_ADC2_Init();
+  MX_ADC4_Init();
   /* USER CODE BEGIN 2 */
 
 
@@ -452,17 +523,11 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
+
 
   HAL_ADC_Start_IT(&hadc1);
-//  HAL_ADC_Start_IT(&hadc2);
-  HAL_UART_Receive_IT(&huart2, in_data, 8);
-  setDimstep(dimstep);
+  HAL_ADC_Start_IT(&hadc4);
   HAL_TIM_Base_Start_IT(&htim3);
-  PWM_Start();
 
   while (1)
   {
@@ -470,10 +535,18 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	  display_digit(warncount, 0, 2, selected == 0);
-	  display_digit(warnnum, 1, 2, selected == 1);
-	  display_digit(lights, 2, 2, selected == 2);
-	  display_digit(dimstep, 3, 2, selected == 3);
+	  if (calibrating == 1){
+		  display_digit(calib_input % 10, 0, 2, 0);
+		  display_digit((calib_input / 10) % 10, 1, 2, 0);
+		  display_digit((calib_input / 100) % 10, 2, 2, 0);
+		  display_digit((calib_input / 1000) % 10, 3, 2, 0);
+	  }
+	  else{
+		  display_digit(warncount, 0, 2, selected == 0);
+		  display_digit(warnnum, 1, 2, selected == 1);
+		  display_digit(lights, 2, 2, selected == 2);
+		  display_digit(dimstep, 3, 2, selected == 3);
+	  }
   }
   /* USER CODE END 3 */
 }
@@ -518,10 +591,8 @@ void SystemClock_Config(void)
     Error_Handler();
   }
   PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USB|RCC_PERIPHCLK_USART2
-                              |RCC_PERIPHCLK_I2C1|RCC_PERIPHCLK_TIM1
-                              |RCC_PERIPHCLK_ADC12;
+                              |RCC_PERIPHCLK_I2C1|RCC_PERIPHCLK_TIM1;
   PeriphClkInit.Usart2ClockSelection = RCC_USART2CLKSOURCE_PCLK1;
-  PeriphClkInit.Adc12ClockSelection = RCC_ADC12PLLCLK_DIV1;
   PeriphClkInit.I2c1ClockSelection = RCC_I2C1CLKSOURCE_HSI;
   PeriphClkInit.USBClockSelection = RCC_USBCLKSOURCE_PLL;
   PeriphClkInit.Tim1ClockSelection = RCC_TIM1CLK_HCLK;
@@ -553,7 +624,7 @@ static void MX_ADC1_Init(void)
   /** Common config
   */
   hadc1.Instance = ADC1;
-  hadc1.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV1;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
   hadc1.Init.Resolution = ADC_RESOLUTION_12B;
   hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
   hadc1.Init.ContinuousConvMode = DISABLE;
@@ -598,59 +669,59 @@ static void MX_ADC1_Init(void)
 }
 
 /**
-  * @brief ADC2 Initialization Function
+  * @brief ADC4 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_ADC2_Init(void)
+static void MX_ADC4_Init(void)
 {
 
-  /* USER CODE BEGIN ADC2_Init 0 */
+  /* USER CODE BEGIN ADC4_Init 0 */
 
-  /* USER CODE END ADC2_Init 0 */
+  /* USER CODE END ADC4_Init 0 */
 
   ADC_ChannelConfTypeDef sConfig = {0};
 
-  /* USER CODE BEGIN ADC2_Init 1 */
+  /* USER CODE BEGIN ADC4_Init 1 */
 
-  /* USER CODE END ADC2_Init 1 */
+  /* USER CODE END ADC4_Init 1 */
 
   /** Common config
   */
-  hadc2.Instance = ADC2;
-  hadc2.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV1;
-  hadc2.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc2.Init.ScanConvMode = ADC_SCAN_DISABLE;
-  hadc2.Init.ContinuousConvMode = DISABLE;
-  hadc2.Init.DiscontinuousConvMode = DISABLE;
-  hadc2.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc2.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-  hadc2.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc2.Init.NbrOfConversion = 1;
-  hadc2.Init.DMAContinuousRequests = DISABLE;
-  hadc2.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
-  hadc2.Init.LowPowerAutoWait = DISABLE;
-  hadc2.Init.Overrun = ADC_OVR_DATA_OVERWRITTEN;
-  if (HAL_ADC_Init(&hadc2) != HAL_OK)
+  hadc4.Instance = ADC4;
+  hadc4.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
+  hadc4.Init.Resolution = ADC_RESOLUTION_10B;
+  hadc4.Init.ScanConvMode = ADC_SCAN_DISABLE;
+  hadc4.Init.ContinuousConvMode = DISABLE;
+  hadc4.Init.DiscontinuousConvMode = DISABLE;
+  hadc4.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc4.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc4.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc4.Init.NbrOfConversion = 1;
+  hadc4.Init.DMAContinuousRequests = DISABLE;
+  hadc4.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc4.Init.LowPowerAutoWait = DISABLE;
+  hadc4.Init.Overrun = ADC_OVR_DATA_OVERWRITTEN;
+  if (HAL_ADC_Init(&hadc4) != HAL_OK)
   {
     Error_Handler();
   }
 
   /** Configure Regular Channel
   */
-  sConfig.Channel = ADC_CHANNEL_5;
+  sConfig.Channel = ADC_CHANNEL_3;
   sConfig.Rank = ADC_REGULAR_RANK_1;
   sConfig.SingleDiff = ADC_SINGLE_ENDED;
   sConfig.SamplingTime = ADC_SAMPLETIME_601CYCLES_5;
   sConfig.OffsetNumber = ADC_OFFSET_NONE;
   sConfig.Offset = 0;
-  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
+  if (HAL_ADC_ConfigChannel(&hadc4, &sConfig) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN ADC2_Init 2 */
+  /* USER CODE BEGIN ADC4_Init 2 */
 
-  /* USER CODE END ADC2_Init 2 */
+  /* USER CODE END ADC4_Init 2 */
 
 }
 
@@ -763,7 +834,7 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 4799;
+  htim1.Init.Prescaler = 479;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim1.Init.Period = 9;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
