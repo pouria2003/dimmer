@@ -40,6 +40,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
+ADC_HandleTypeDef hadc2;
 
 I2C_HandleTypeDef hi2c1;
 
@@ -68,6 +69,7 @@ static void MX_USART2_UART_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
+static void MX_ADC2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -75,6 +77,16 @@ static void MX_TIM3_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+enum log_info{
+	DIGIT_CHANGED,
+	DIGIT_INCREASED,
+	DIGIT_DECREASED,
+	WAVE_CHANGED,
+	DIMSTEP_INCREASED,
+	DIMSTEP_DECREASED,
+	NOT_VALID_VALUE,
+	CRITICAL_SITUATION
+};
 
 typedef struct
 {
@@ -92,7 +104,7 @@ int warnnum = 1;
 int warncount = 0;
 unsigned char in_data[100];
 unsigned char message[50];
-int treshhold = 1000;
+int treshhold = 700;
 int warnsit = 0;
 
 Tone sinusoid[200];
@@ -101,6 +113,43 @@ Tone ustep[200];
 
 const float pi = 3.1415;
 const float step = 0.031415;
+
+
+void writeLog(int log_info, int info) {
+	switch (log_info) {
+	case DIGIT_CHANGED :
+			sprintf(message, "[INFO] Digit changed\n");
+			break;
+	case DIGIT_INCREASED :
+			sprintf(message, "[INFO] Digit %d Increased\n", info);
+			break;
+	case DIGIT_DECREASED :
+			sprintf(message, "[INFO] Digit %d Decreased\n", info);
+			break;
+	case WAVE_CHANGED :
+			sprintf(message, "[INFO] Wave changed to %s\n", ( (info == 1) ? "sinusoid" : (info == 2) ? "step" : "ramp") );
+			break;
+	case DIMSTEP_INCREASED :
+			sprintf(message, "[INFO] DimStep increased\n");
+			break;
+	case DIMSTEP_DECREASED :
+			sprintf(message, "[INFO] DimStep decreased\n");
+			break;
+	case NOT_VALID_VALUE :
+			sprintf(message, "[ERR] Not valid Value\n");
+			break;
+	case CRITICAL_SITUATION :
+			sprintf(message, "[WARN] Critical Situation. Light value:%d\n", info);
+			break;
+	default :
+			sprintf(message, "Unknown message\n");
+			break;
+	}
+	HAL_UART_Transmit(&huart2, message, strlen(message), 1000);
+
+}
+
+
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
@@ -148,33 +197,43 @@ void PWM_Change_Tone(uint16_t pwm_freq, uint16_t volume) // pwm_freq (1 - 20000)
 }
 
 
+int last_warn_change = -300;
 
+void warn(int light) {
 
-void warn() {
-	sprintf(message, "warn on:%03d\n", warncount);
-	HAL_UART_Transmit(&huart2, message, 12, 1000);
+	if(HAL_GetTick() - last_warn_change < 300)
+		return;
+//	sprintf(message, "warn on %d - %d\n", HAL_GetTick(), last_warn_change);
+//	HAL_UART_Transmit(&huart2, message, strlen(message), 100);
+	writeLog(CRITICAL_SITUATION, light);
+//	HAL_UART_Transmit(&huart2, message, 12, 1000);
 	HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
 	HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_2);
 	HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_3);
 	HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_4);
 	warncount++;
-	volume = 50;
+	last_warn_change = HAL_GetTick();
 }
 
 void warnOff() {
-	strcpy(message, "warn off\n");
-	HAL_UART_Transmit(&huart2, message, 9, 1000);
+
+	if(HAL_GetTick() - last_warn_change < 300)
+		return;
+//	sprintf(message, "warn off %d - %d\n", HAL_GetTick(), last_warn_change);
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
-	volume = 0;
 	PWM_Change_Tone(0, 0);
+	last_warn_change = HAL_GetTick();
+
 }
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
-	if(hadc->Instance == ADC1) {
+
+
+		static int current_time = 0;
 		static int sample = 0;
 		static int buff[10];
 		int x;
@@ -186,33 +245,33 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 			for(int i = 0; i < 10; ++i) {
 				x = (x > buff[i]) ? x : buff[i];
 			}
+
 			if(x > treshhold && warnsit == 0) {
 					warnsit = 1;
-					warn();
+					warn(x);
 			} else if(x <= treshhold && warnsit == 1) {
-					warnOff();
-					warnsit = 0;
+				warnOff();
+				warnsit = 0;
+
 			}
 		}
 		HAL_ADC_Start_IT(&hadc1);
-	}
-	else if(hadc->Instance == ADC2) {
-//		int temp = HAL_ADC_GetValue(&hadc2);
-//		sprintf(message, "vol : %d\n", temp);
-//		HAL_UART_Transmit(&huart2, message, 9, 1000);
-//		HAL_ADC_Start_IT(&hadc2);
-	}
+
 }
 
 void setDimstep(int val) {
 	if(val >= 0 && val <= 9) {
+		if(val > dimstep)
+			writeLog(DIMSTEP_INCREASED, 0);
+		else
+			writeLog(DIMSTEP_DECREASED, 0);
 		dimstep = val;
 		TIM1->CCR1 = (lights >= 1) ? dimstep : 0;
 		TIM1->CCR2 = (lights >= 2) ? dimstep : 0;
 		TIM1->CCR3 = (lights >= 3) ? dimstep : 0;
 		TIM1->CCR4 = (lights >= 4) ? dimstep : 0;
 	} else {
-//		printError();
+		writeLog(NOT_VALID_VALUE, 0);
 	}
 }
 
@@ -222,27 +281,18 @@ void setLights(int val) {
 		setDimstep(dimstep);
 	}
 	else {
-//		printError();
+		writeLog(NOT_VALID_VALUE, 0);
 	}
 }
 
 void setWarnnum(int val) {
 	if(val >= 1 && val <= 3) {
 		warnnum = val;
+		writeLog(WAVE_CHANGED, warnnum);
 	}
 	else {
-
-
+		writeLog(NOT_VALID_VALUE, 0);
 	}
-}
-
-void commandExtract(unsigned char *dest, int max_size, unsigned char *source) {
-	int i;
-	for(i = 0; source[i] != ':' && i < max_size - 1; ++i){
-		dest[i] = source[i];
-	}
-	dest[i] = '\0';
-
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -252,7 +302,6 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     {
     	static unsigned char command[10];
     	static int in_val;
-//    	commandExtract(command, 10, in_data);
     	if(in_data[0] == 'D') {
     		HAL_UART_Receive(&huart2, in_data, 1, 100);
     		message[0] = '\n';
@@ -271,7 +320,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     		in_val = in_data[0] - '0';
     		setWarnnum(in_val);
     	}
-
+    	sprintf(message, "\n");
+    	HAL_UART_Transmit(&huart2, message, 1, 1000);
     	HAL_UART_Receive_IT(&huart2, in_data, 8);
 
     }
@@ -304,8 +354,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
 	}
 	else
 		last_interrupt = HAL_GetTick();
-	sprintf(message, "EXTI : %d\n", GPIO_Pin);
-	HAL_UART_Transmit(&huart2, message, 9, 1000);
+
 	if (GPIO_Pin == GPIO_PIN_7){
 		if (selected == 1)
 		  selected = 3;
@@ -313,8 +362,10 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
 		  selected -= 1;
 	}
 	if (GPIO_Pin == GPIO_PIN_8){
+		writeLog(DIGIT_CHANGED, 0);
+		writeLog(DIGIT_INCREASED, selected);
 		if (selected == 1){
-			warnnum = warnnum < 3 ? warnnum + 1 : 1;
+			setWarnnum((warnnum < 3 ? warnnum + 1 : 1));
 		}
 		else if (selected == 2){
 			setLights((lights + 1) % 5);
@@ -324,6 +375,8 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
 		}
 	}
 	if (GPIO_Pin == GPIO_PIN_9){
+		writeLog(DIGIT_CHANGED, 0);
+		writeLog(DIGIT_DECREASED, selected);
 		if (selected == 1){
 			warnnum = warnnum >  1 ? warnnum - 1 : 3;
 		}
@@ -389,6 +442,7 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
+  MX_ADC2_Init();
   /* USER CODE BEGIN 2 */
 
 
@@ -540,6 +594,63 @@ static void MX_ADC1_Init(void)
   /* USER CODE BEGIN ADC1_Init 2 */
 
   /* USER CODE END ADC1_Init 2 */
+
+}
+
+/**
+  * @brief ADC2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC2_Init(void)
+{
+
+  /* USER CODE BEGIN ADC2_Init 0 */
+
+  /* USER CODE END ADC2_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC2_Init 1 */
+
+  /* USER CODE END ADC2_Init 1 */
+
+  /** Common config
+  */
+  hadc2.Instance = ADC2;
+  hadc2.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV1;
+  hadc2.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc2.Init.ScanConvMode = ADC_SCAN_DISABLE;
+  hadc2.Init.ContinuousConvMode = DISABLE;
+  hadc2.Init.DiscontinuousConvMode = DISABLE;
+  hadc2.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc2.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc2.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc2.Init.NbrOfConversion = 1;
+  hadc2.Init.DMAContinuousRequests = DISABLE;
+  hadc2.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc2.Init.LowPowerAutoWait = DISABLE;
+  hadc2.Init.Overrun = ADC_OVR_DATA_OVERWRITTEN;
+  if (HAL_ADC_Init(&hadc2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_5;
+  sConfig.Rank = ADC_REGULAR_RANK_1;
+  sConfig.SingleDiff = ADC_SINGLE_ENDED;
+  sConfig.SamplingTime = ADC_SAMPLETIME_601CYCLES_5;
+  sConfig.OffsetNumber = ADC_OFFSET_NONE;
+  sConfig.Offset = 0;
+  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC2_Init 2 */
+
+  /* USER CODE END ADC2_Init 2 */
 
 }
 
